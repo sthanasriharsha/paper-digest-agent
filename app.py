@@ -2,6 +2,9 @@
 Streamlit UI for Paper Digest Agent.
 Run locally: streamlit run app.py
 Deploy free at: https://share.streamlit.io (Streamlit Community Cloud)
+
+API key is read silently from Streamlit secrets or environment variables —
+no key input field is shown to the user.
 """
 
 import os
@@ -13,34 +16,28 @@ st.set_page_config(page_title="Paper Digest Agent", page_icon="🧠", layout="ce
 st.title("🧠 Paper Digest Agent")
 st.caption(
     "LangChain + LangGraph + Pydantic AI + CrewAI — summarizes a research paper and "
-    "suggests follow-ups for your ISL avatar research. 100% free (runs on Google Gemini's free tier)."
+    "suggests follow-ups for your ISL avatar research."
 )
 
-with st.sidebar:
-    st.header("Setup")
-    st.markdown("Get a free key: [aistudio.google.com/apikey](https://aistudio.google.com/apikey)")
 
-    def _get_secret(name):
-        try:
-            return st.secrets.get(name, "")
-        except Exception:
-            return ""
+def _get_secret(name):
+    try:
+        return st.secrets.get(name, "")
+    except Exception:
+        return ""
 
-    default_key = (
-        os.environ.get("GEMINI_API_KEY", "")
-        or os.environ.get("GOOGLE_API_KEY", "")
-        or _get_secret("GEMINI_API_KEY")
-        or _get_secret("GOOGLE_API_KEY")
-    )
-    api_key = st.text_input(
-        "Gemini API Key", type="password", key="gemini_key_input", value=default_key
-    )
-    if default_key:
-        st.caption("✓ Pre-filled from saved key")
 
-# --- Everything the user needs to fill in lives inside one form, so all values
-#     are captured together the moment "Summarize Paper" is clicked. This avoids
-#     the widget-timing bug where a just-pasted value isn't registered yet. ---
+API_KEY = (
+    os.environ.get("GEMINI_API_KEY", "")
+    or os.environ.get("GOOGLE_API_KEY", "")
+    or _get_secret("GEMINI_API_KEY")
+    or _get_secret("GOOGLE_API_KEY")
+)
+
+if API_KEY:
+    os.environ["GEMINI_API_KEY"] = API_KEY
+    os.environ["GOOGLE_API_KEY"] = API_KEY
+
 with st.form("digest_form"):
     arxiv_input = st.text_input(
         "arXiv ID or URL", placeholder="e.g. 2511.22940 or https://arxiv.org/abs/2511.22940"
@@ -52,19 +49,17 @@ with st.form("digest_form"):
     submitted = st.form_submit_button("Summarize Paper", type="primary")
 
 if submitted:
-    key_value = (api_key or "").strip()
     arxiv_value = (arxiv_input or "").strip()
 
-    if not key_value:
-        st.error("Please enter your free Gemini API key in the sidebar, then click Summarize Paper again.")
+    if not API_KEY:
+        st.error(
+            "No Gemini API key configured. Add GEMINI_API_KEY under "
+            "Settings → Secrets in Streamlit Cloud, or set it as an environment "
+            "variable if running locally."
+        )
     elif not arxiv_value:
         st.error("Please enter an arXiv ID or URL.")
     else:
-        # Set env vars BEFORE importing core, so the pydantic-ai / CrewAI clients
-        # inside core.py are constructed with the correct key.
-        os.environ["GEMINI_API_KEY"] = key_value
-        os.environ["GOOGLE_API_KEY"] = key_value
-
         from core import download_arxiv_pdf, summarize_paper
 
         with st.spinner("Downloading paper..."):
