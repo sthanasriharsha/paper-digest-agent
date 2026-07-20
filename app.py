@@ -19,12 +19,24 @@ st.caption(
 with st.sidebar:
     st.header("Setup")
     st.markdown("Get a free key: [aistudio.google.com/apikey](https://aistudio.google.com/apikey)")
-    default_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+
+    def _get_secret(name):
+        try:
+            return st.secrets.get(name, "")
+        except Exception:
+            return ""
+
+    default_key = (
+        os.environ.get("GEMINI_API_KEY", "")
+        or os.environ.get("GOOGLE_API_KEY", "")
+        or _get_secret("GEMINI_API_KEY")
+        or _get_secret("GOOGLE_API_KEY")
+    )
     api_key = st.text_input(
         "Gemini API Key", type="password", key="gemini_key_input", value=default_key
     )
     if default_key:
-        st.caption("✓ Pre-filled from your environment variable")
+        st.caption("✓ Pre-filled from saved key")
 
 # --- Everything the user needs to fill in lives inside one form, so all values
 #     are captured together the moment "Summarize Paper" is clicked. This avoids
