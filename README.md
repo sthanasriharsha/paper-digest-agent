@@ -1,6 +1,6 @@
 # Paper Digest Agent — 100% Free Version (Google Gemini)
 
-A research-paper summarizer chaining **LangChain**, **LangGraph**, **Pydantic AI**, and **CrewAI** — running entirely on Google Gemini's free tier, no credit card anywhere.
+A research-paper summarizer chaining **LangChain**, **LangGraph**, **Pydantic AI**, and **CrewAI** — running entirely on Google Gemini's free tier, 
 
 ```
 arXiv PDF --> [LangChain: load + chunk] --> [LangGraph: extract -> summarize -> critique loop]
