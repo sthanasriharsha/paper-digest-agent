@@ -1,8 +1,17 @@
 """
 Paper Digest Agent — core.py
-Combines LangChain (ingestion), LangGraph (control flow),
-Pydantic AI (structured output), and CrewAI (multi-agent review)
-into one pipeline that summarizes a research paper (PDF or arXiv URL).
+Combines LangChain (ingestion), LangGraph (control flow), and Pydantic AI
+(structured output + domain-expert review) into one pipeline that summarizes
+a research paper (PDF or arXiv URL).
+
+NOTE: CrewAI was originally used for the domain-expert review step, but
+CrewAI's chromadb dependency is currently broken on Python 3.14 (a known,
+unresolved upstream bug: chromadb's pydantic-v1 compatibility shim crashes
+on class construction under 3.14 — see chroma-core/chroma#6546). Rather than
+depend on the deploy platform using an older Python version, the reviewer
+role below is implemented as a second Pydantic AI agent instead. It plays
+the same "domain expert" role with the same prompt strategy CrewAI would
+have used, just without the fragile dependency chain.
 
 100% free to run: uses Google Gemini's free API (gemini-2.5-flash) instead of OpenAI.
 Get a free key at https://aistudio.google.com/apikey — just needs a Google account.
@@ -27,9 +36,6 @@ from langgraph.graph import StateGraph, END
 
 # --- Pydantic AI: structured, validated LLM output --------------------------
 from pydantic_ai import Agent as PydanticAIAgent
-
-# --- CrewAI: multi-agent review layer ---------------------------------------
-from crewai import Agent, Task, Crew, LLM
 
 GEMINI_MODEL_NAME = "gemini-2.5-flash"  # currently on the free tier (2.0-flash is not, as of mid-2026)
 # pydantic-ai's GoogleModel reads GOOGLE_API_KEY; bridge from GEMINI_API_KEY if that's what's set
@@ -161,37 +167,32 @@ def build_graph():
 
 
 # =============================================================================
-# 4. CREWAI — domain-expert review layer
+# 4. DOMAIN-EXPERT REVIEW LAYER (second Pydantic AI agent, playing the role
+#    CrewAI's Agent/Task/Crew would have — same prompting strategy, no chromadb)
 # =============================================================================
+domain_expert_agent = PydanticAIAgent(
+    PYDANTIC_AI_MODEL_STRING,
+    output_type=str,
+    system_prompt=(
+        "You are a Sign Language Avatar Research Expert. You specialize in "
+        "skeleton-to-avatar animation, pose-guided video generation, and Indian "
+        "Sign Language research. You know models like UniAnimate-DiT, "
+        "AnimateAnyone, and WanVideo-based pipelines. Given a paper summary and "
+        "a researcher's current work, write 2-3 concrete, actionable follow-up "
+        "experiments or techniques the researcher could try, based on the paper. "
+        "Be specific — reference actual tools/models where relevant, not generic advice."
+    ),
+)
+
+
 def run_crew_review(summary: PaperSummary, research_context: str) -> str:
-    llm = LLM(model=f"gemini/{GEMINI_MODEL_NAME}")
-
-    domain_expert = Agent(
-        role="Sign Language Avatar Research Expert",
-        goal="Evaluate papers for relevance to ISL avatar generation research",
-        backstory=(
-            "You specialize in skeleton-to-avatar animation, pose-guided video "
-            "generation, and Indian Sign Language research. You know models like "
-            "UniAnimate-DiT, AnimateAnyone, and WanVideo-based pipelines."
-        ),
-        llm=llm,
-        verbose=False,
+    prompt = (
+        f"Paper summary:\n{summary.model_dump_json(indent=2)}\n\n"
+        f"Researcher's current work:\n{research_context}\n\n"
+        "Write 2-3 concrete follow-up experiments or techniques based on this paper."
     )
-
-    review_task = Task(
-        description=(
-            f"Given this paper summary:\n{summary.model_dump_json(indent=2)}\n\n"
-            f"And this researcher's current work:\n{research_context}\n\n"
-            "Write 2-3 concrete follow-up experiments or techniques the "
-            "researcher could try, based on this paper. Be specific and actionable."
-        ),
-        expected_output="A short list of 2-3 concrete, actionable follow-up ideas.",
-        agent=domain_expert,
-    )
-
-    crew = Crew(agents=[domain_expert], tasks=[review_task], verbose=False)
-    result = crew.kickoff()
-    return str(result)
+    result = domain_expert_agent.run_sync(prompt)
+    return result.output
 
 
 # =============================================================================
