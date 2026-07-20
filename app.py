@@ -15,7 +15,7 @@ st.set_page_config(page_title="Paper Digest Agent", page_icon="🧠", layout="ce
 
 st.title("🧠 Paper Digest Agent")
 st.caption(
-    "LangChain + LangGraph + Pydantic AI + CrewAI — summarizes a research paper and "
+    "LangChain + LangGraph + Pydantic AI — summarizes a research paper and "
     "suggests follow-ups for your ISL avatar research."
 )
 
@@ -86,7 +86,7 @@ if submitted:
         st.markdown("### Limitations")
         st.write(summary["limitations"])
 
-        st.markdown("### 🔧 Follow-up Ideas (CrewAI domain expert)")
+        st.markdown("### 🔧 Follow-up Ideas (domain-expert agent)")
         st.write(result["follow_up_ideas"])
 
         with st.expander("Raw JSON output"):
