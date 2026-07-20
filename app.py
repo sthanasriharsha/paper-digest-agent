@@ -44,7 +44,7 @@ with st.form("digest_form"):
     )
     research_context = st.text_area(
         "Your current research context (optional)",
-        value="Working on ISL avatar video generation using pose-guided diffusion (WanVideo / ComfyUI).",
+        value="Your description",
     )
     submitted = st.form_submit_button("Summarize Paper", type="primary")
 
