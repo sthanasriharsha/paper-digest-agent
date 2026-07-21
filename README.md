@@ -33,11 +33,11 @@ Streamlit UI        →  renders the summary + follow-up ideas
 
 ## Features
 
-- 📄 **Just paste an arXiv ID or URL** — no manual PDF upload needed
-- 🔁 **Self-correcting summaries** — a built-in critique step catches ungrounded claims and retries
-- ✅ **Type-safe, structured output** — no fragile JSON parsing, powered by Pydantic AI
-- 🤖 **Two-agent design** — a summarizer and a domain-expert reviewer that reasons over the first agent's output
-- 💸 **Completely free to run** — Google Gemini's free tier + free Streamlit hosting
+-  **Just paste an arXiv ID or URL** — no manual PDF upload needed
+-  **Self-correcting summaries** — a built-in critique step catches ungrounded claims and retries
+-  **Type-safe, structured output** — no fragile JSON parsing, powered by Pydantic AI
+-  **Two-agent design** — a summarizer and a domain-expert reviewer that reasons over the first agent's output
+-  **Completely free to run** — Google Gemini's free tier + free Streamlit hosting
 
 ## Tech stack
 
