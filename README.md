@@ -1,4 +1,4 @@
-# 🧠 Paper Digest Agent
+#  Paper Digest Agent
 
 An AI pipeline that reads an arXiv research paper and produces a structured summary — method, key results, limitations, and a relevance score — plus concrete follow-up experiment ideas from a domain-expert AI reviewer.
 
