@@ -1,62 +1,88 @@
+"""
+Paper Digest Agent
+-------------------
+Takes an arXiv paper and produces:
+  1. A structured summary (method, key results, limitations, relevance score)
+  2. A short list of concrete follow-up research ideas
+
+Pipeline:
+  LangChain   -> downloads the PDF and splits it into clean text chunks
+  LangGraph   -> runs a summarize -> critique -> (retry if needed) loop
+  Pydantic AI -> two agents: one writes the summary, one reviews it and
+                 suggests follow-up experiments
+
+Runs on Google Gemini's free tier, so it costs nothing to use.
+Set your API key first:  export GOOGLE_API_KEY=your_key_here
+"""
+
 import os
 import re
+import json
+import sys
 import tempfile
-import requests
 from typing import TypedDict, Optional, List
 
+import requests
 from pydantic import BaseModel, Field
 
-# --- LangChain: document loading + splitting -------------------------------
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-# --- LangGraph: cyclic control flow -----------------------------------------
 from langgraph.graph import StateGraph, END
+from pydantic_ai import Agent
 
-# --- Pydantic AI: structured, validated LLM output --------------------------
-from pydantic_ai import Agent as PydanticAIAgent
 
-GEMINI_MODEL_NAME = "gemini-2.5-flash"  # currently on the free tier (2.0-flash is not, as of mid-2026)
-# pydantic-ai's GoogleModel reads GOOGLE_API_KEY; bridge from GEMINI_API_KEY if that's what's set
+MODEL = "google:gemini-2.5-flash"
+
+# pydantic-ai looks for GOOGLE_API_KEY specifically, so if the user only set
+# GEMINI_API_KEY, copy it over.
 if os.environ.get("GEMINI_API_KEY") and not os.environ.get("GOOGLE_API_KEY"):
     os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
-PYDANTIC_AI_MODEL_STRING = f"google:{GEMINI_MODEL_NAME}"
 
 
-# =============================================================================
-# 1. PYDANTIC AI — output schema
-# =============================================================================
+# ---------------------------------------------------------------------------
+# Output schema — this is what the summarizer agent is required to return.
+# Pydantic validates the structure automatically, so there's no manual
+# JSON parsing anywhere in this file.
+# ---------------------------------------------------------------------------
 class PaperSummary(BaseModel):
-    title: str = Field(description="Paper title")
-    method: str = Field(description="One paragraph describing the core method")
-    key_results: List[str] = Field(description="3-5 bullet point key results")
-    limitations: str = Field(description="Stated or implied limitations")
-    relevance_score: int = Field(
-        description="1-10 relevance to sign-language avatar / ISL research", ge=1, le=10
-    )
-    relevance_notes: str = Field(description="Why it scores this way")
+    title: str
+    method: str = Field(description="A short paragraph describing the core method")
+    key_results: List[str] = Field(description="3-5 key findings")
+    limitations: str
+    relevance_score: int = Field(ge=1, le=10, description="Relevance to sign-language avatar research")
+    relevance_notes: str = Field(description="Why it scored the way it did")
 
 
-summarizer_agent = PydanticAIAgent(
-    PYDANTIC_AI_MODEL_STRING,
+summarizer = Agent(
+    MODEL,
     output_type=PaperSummary,
     system_prompt=(
         "You are a research assistant specializing in computer vision and "
-        "sign-language avatar generation. Summarize the given paper text "
-        "into the required structured format. Be precise and avoid inventing "
-        "results not present in the text."
+        "sign-language avatar generation. Summarize the paper text into the "
+        "required format. Only report what's actually in the text — don't "
+        "invent results."
+    ),
+)
+
+reviewer = Agent(
+    MODEL,
+    output_type=str,
+    system_prompt=(
+        "You are a sign-language avatar research expert, familiar with "
+        "pose-guided video generation models like UniAnimate-DiT, "
+        "AnimateAnyone, and WanVideo. Given a paper summary and a "
+        "researcher's current project, suggest 2-3 specific, actionable "
+        "follow-up experiments. Reference real tools and techniques, not "
+        "generic advice."
     ),
 )
 
 
-# =============================================================================
-# 2. LANGCHAIN — ingestion helpers
-# =============================================================================
-def download_arxiv_pdf(arxiv_id_or_url: str, out_path: str = None) -> str:
-    """Accepts either an arXiv ID (e.g. 2511.22940) or a full URL."""
-    if out_path is None:
-        out_path = os.path.join(tempfile.gettempdir(), "paper.pdf")
-
+# ---------------------------------------------------------------------------
+# Step 1: download and read the paper
+# ---------------------------------------------------------------------------
+def download_arxiv_pdf(arxiv_id_or_url: str) -> str:
+    """Downloads a paper's PDF given either an arXiv ID or a full URL."""
     if arxiv_id_or_url.startswith("http"):
         pdf_url = arxiv_id_or_url.replace("/abs/", "/pdf/")
         if not pdf_url.endswith(".pdf"):
@@ -64,147 +90,120 @@ def download_arxiv_pdf(arxiv_id_or_url: str, out_path: str = None) -> str:
     else:
         pdf_url = f"https://arxiv.org/pdf/{arxiv_id_or_url}.pdf"
 
-    resp = requests.get(pdf_url, timeout=30)
-    resp.raise_for_status()
+    response = requests.get(pdf_url, timeout=30)
+    response.raise_for_status()
+
+    out_path = os.path.join(tempfile.gettempdir(), "paper.pdf")
     with open(out_path, "wb") as f:
-        f.write(resp.content)
+        f.write(response.content)
     return out_path
 
 
-def load_and_chunk(pdf_path: str) -> str:
-    """Loads a PDF and returns cleaned, concatenated text (first ~12k chars)."""
-    loader = PyPDFLoader(pdf_path)
-    pages = loader.load()
+def extract_text(pdf_path: str) -> str:
+    """Loads a PDF and returns cleaned text, trimmed to fit comfortably
+    within the model's context window."""
+    pages = PyPDFLoader(pdf_path).load()
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=150)
     chunks = splitter.split_documents(pages)
 
-    full_text = "\n".join(c.page_content for c in chunks)
-    full_text = re.sub(r"\s+", " ", full_text)
-    # Keep it within a reasonable context budget for the demo
-    return full_text[:12000]
+    text = " ".join(chunk.page_content for chunk in chunks)
+    text = re.sub(r"\s+", " ", text)
+    return text[:12000]
 
 
-# =============================================================================
-# 3. LANGGRAPH — extract -> summarize -> critique loop
-# =============================================================================
-class GraphState(TypedDict):
+# ---------------------------------------------------------------------------
+# Step 2: summarize -> critique -> retry (LangGraph)
+# ---------------------------------------------------------------------------
+class PipelineState(TypedDict):
     paper_text: str
     summary: Optional[PaperSummary]
-    critique_passed: bool
+    is_grounded: bool
     attempts: int
 
 
-def node_extract(state: GraphState) -> GraphState:
-    # In this simple pipeline extraction already happened in load_and_chunk,
-    # so this node just validates we have text to work with.
-    if not state["paper_text"] or len(state["paper_text"]) < 200:
-        raise ValueError("Paper text too short — extraction failed.")
-    return state
-
-
-def node_summarize(state: GraphState) -> GraphState:
-    result = summarizer_agent.run_sync(
-        f"Summarize this paper text:\n\n{state['paper_text']}"
-    )
+def summarize_step(state: PipelineState) -> PipelineState:
+    result = summarizer.run_sync(f"Summarize this paper:\n\n{state['paper_text']}")
     state["summary"] = result.output
     state["attempts"] += 1
     return state
 
 
-def node_critique(state: GraphState) -> GraphState:
+def critique_step(state: PipelineState) -> PipelineState:
+    """Sanity-checks the summary against the source text: do the claimed
+    key results actually show up in the paper, at least loosely? This is a
+    cheap heuristic rather than another LLM call, to keep things fast and
+    within the free-tier request limits."""
+    text = state["paper_text"].lower()
     summary = state["summary"]
-    # Lightweight grounding check: do key_results terms actually appear
-    # (loosely) in the source text? Cheap heuristic to avoid an extra LLM call.
-    text_lower = state["paper_text"].lower()
-    grounded_hits = sum(
-        1 for r in summary.key_results if any(w.lower() in text_lower for w in r.split()[:4])
+
+    hits = sum(
+        1 for result in summary.key_results
+        if any(word.lower() in text for word in result.split()[:4])
     )
-    state["critique_passed"] = grounded_hits >= max(1, len(summary.key_results) // 2)
+    state["is_grounded"] = hits >= max(1, len(summary.key_results) // 2)
     return state
 
 
-def route_after_critique(state: GraphState) -> str:
-    if state["critique_passed"] or state["attempts"] >= 2:
-        return "end"
+def decide_next_step(state: PipelineState) -> str:
+    if state["is_grounded"] or state["attempts"] >= 2:
+        return "done"
     return "retry"
 
 
-def build_graph():
-    graph = StateGraph(GraphState)
-    graph.add_node("extract", node_extract)
-    graph.add_node("summarize", node_summarize)
-    graph.add_node("critique", node_critique)
+def build_pipeline():
+    graph = StateGraph(PipelineState)
+    graph.add_node("summarize", summarize_step)
+    graph.add_node("critique", critique_step)
 
-    graph.set_entry_point("extract")
-    graph.add_edge("extract", "summarize")
+    graph.set_entry_point("summarize")
     graph.add_edge("summarize", "critique")
     graph.add_conditional_edges(
-        "critique", route_after_critique, {"retry": "summarize", "end": END}
+        "critique", decide_next_step, {"retry": "summarize", "done": END}
     )
     return graph.compile()
 
 
-# =============================================================================
-# 4. DOMAIN-EXPERT REVIEW LAYER (second Pydantic AI agent, playing the role
-#    CrewAI's Agent/Task/Crew would have — same prompting strategy, no chromadb)
-# =============================================================================
-domain_expert_agent = PydanticAIAgent(
-    PYDANTIC_AI_MODEL_STRING,
-    output_type=str,
-    system_prompt=(
-        "You are a Sign Language Avatar Research Expert. You specialize in "
-        "skeleton-to-avatar animation, pose-guided video generation, and Indian "
-        "Sign Language research. You know models like UniAnimate-DiT, "
-        "AnimateAnyone, and WanVideo-based pipelines. Given a paper summary and "
-        "a researcher's current work, write 2-3 concrete, actionable follow-up "
-        "experiments or techniques the researcher could try, based on the paper. "
-        "Be specific — reference actual tools/models where relevant, not generic advice."
-    ),
-)
-
-
-def run_crew_review(summary: PaperSummary, research_context: str) -> str:
+# ---------------------------------------------------------------------------
+# Step 3: get follow-up ideas from the reviewer agent
+# ---------------------------------------------------------------------------
+def get_follow_up_ideas(summary: PaperSummary, research_context: str) -> str:
     prompt = (
         f"Paper summary:\n{summary.model_dump_json(indent=2)}\n\n"
-        f"Researcher's current work:\n{research_context}\n\n"
-        "Write 2-3 concrete follow-up experiments or techniques based on this paper."
+        f"Researcher's current project:\n{research_context}\n\n"
+        "Suggest 2-3 concrete follow-up experiments based on this paper."
     )
-    result = domain_expert_agent.run_sync(prompt)
+    result = reviewer.run_sync(prompt)
     return result.output
 
 
-# =============================================================================
-# 5. FULL PIPELINE
-# =============================================================================
+# ---------------------------------------------------------------------------
+# Full pipeline
+# ---------------------------------------------------------------------------
 def summarize_paper(pdf_path: str, research_context: str = "") -> dict:
-    paper_text = load_and_chunk(pdf_path)
+    paper_text = extract_text(pdf_path)
 
-    app = build_graph()
-    final_state = app.invoke(
-        {"paper_text": paper_text, "summary": None, "critique_passed": False, "attempts": 0}
+    pipeline = build_pipeline()
+    final_state = pipeline.invoke(
+        {"paper_text": paper_text, "summary": None, "is_grounded": False, "attempts": 0}
     )
 
-    summary: PaperSummary = final_state["summary"]
-    follow_ups = run_crew_review(summary, research_context or "General AI/ML research.")
+    summary = final_state["summary"]
+    follow_ups = get_follow_up_ideas(summary, research_context or "General AI/ML research.")
 
     return {
         "summary": summary.model_dump(),
-        "grounded": final_state["critique_passed"],
+        "grounded": final_state["is_grounded"],
         "attempts": final_state["attempts"],
         "follow_up_ideas": follow_ups,
     }
 
 
 if __name__ == "__main__":
-    # Quick CLI test: python core.py 2511.22940
-    import sys
-    import json
-
     arxiv_id = sys.argv[1] if len(sys.argv) > 1 else "2511.22940"
-    path = download_arxiv_pdf(arxiv_id)
-    output = summarize_paper(
-        path,
+    pdf_path = download_arxiv_pdf(arxiv_id)
+    result = summarize_paper(
+        pdf_path,
         research_context="Working on ISL avatar video generation using pose-guided diffusion models.",
     )
-    print(json.dumps(output, indent=2))
+    print(json.dumps(result, indent=2))
