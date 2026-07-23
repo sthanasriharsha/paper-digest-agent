@@ -1,24 +1,3 @@
-"""
-Paper Digest Agent — core.py
-Combines LangChain (ingestion), LangGraph (control flow), and Pydantic AI
-(structured output + domain-expert review) into one pipeline that summarizes
-a research paper (PDF or arXiv URL).
-
-NOTE: CrewAI was originally used for the domain-expert review step, but
-CrewAI's chromadb dependency is currently broken on Python 3.14 (a known,
-unresolved upstream bug: chromadb's pydantic-v1 compatibility shim crashes
-on class construction under 3.14 — see chroma-core/chroma#6546). Rather than
-depend on the deploy platform using an older Python version, the reviewer
-role below is implemented as a second Pydantic AI agent instead. It plays
-the same "domain expert" role with the same prompt strategy CrewAI would
-have used, just without the fragile dependency chain.
-
-100% free to run: uses Google Gemini's free API (gemini-2.5-flash) instead of OpenAI.
-Get a free key at https://aistudio.google.com/apikey — just needs a Google account.
-
-Requires: GEMINI_API_KEY environment variable.
-"""
-
 import os
 import re
 import tempfile
